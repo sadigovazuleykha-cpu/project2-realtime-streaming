@@ -1,0 +1,131 @@
+# =============================================================================
+# Project 2 — Real-Time Streaming & Dashboards
+# Infra: Kafka (+Zookeeper) · PostgreSQL · Airflow · Metabase
+# (Spark runs via pip-installed pyspark in Step 3 — local mode is plenty for
+#  this data volume, and it sidesteps Bitnami's 2025 image paywalling.)
+#
+# Start everything:   docker-compose up -d
+# Tear down + wipe:   docker-compose down -v
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------
+  # Kafka — the event backbone. The OpenSky producer (Step 2) publishes
+  # aircraft state vectors here, on topic `aircraft_state_v1`.
+  # ---------------------------------------------------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"     # external — for scripts run on your host machine
+      - "29092:29092"   # internal — for other containers (Spark, Airflow)
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    restart: unless-stopped
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"     # http://localhost:8080 — watch topics/messages live
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # PostgreSQL — serving store. Spark (Step 3) writes curated aggregates
+  # here; Metabase (Step 6) reads from here for dashboards.
+  # ---------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: matrix
+      POSTGRES_PASSWORD: matrix
+      POSTGRES_DB: streaming
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init_schema.sql:/docker-entrypoint-initdb.d/init_schema.sql
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # Airflow — schedules the producer + supporting jobs (Step 4).
+  # `standalone` bundles webserver + scheduler + triggerer with a SQLite
+  # backend. Good enough for this project; not a production pattern.
+  # ---------------------------------------------------------------------
+  airflow:
+    image: apache/airflow:2.9.3
+    container_name: airflow
+    command: standalone
+    ports:
+      - "8081:8080"     # http://localhost:8081 — login admin/admin
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+      _PIP_ADDITIONAL_REQUIREMENTS: "requests>=2.31 kafka-python>=2.0.2"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./producer:/opt/airflow/producer
+      - airflow_home:/opt/airflow
+    depends_on:
+      - kafka
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # Spark Structured Streaming — Step 3. Built from our own Dockerfile
+  # (Linux + Java + pyspark) instead of installing Spark on Windows.
+  # ---------------------------------------------------------------------
+  spark-streaming:
+    build:
+      context: ./streaming
+    container_name: spark-streaming
+    depends_on:
+      - kafka
+      - postgres
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      PG_URL: jdbc:postgresql://postgres:5432/streaming
+      PG_USER: matrix
+      PG_PASSWORD: matrix
+    volumes:
+      - ./streaming:/app
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # Metabase — dashboards on top of PostgreSQL (Step 6).
+  # ---------------------------------------------------------------------
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase
+    ports:
+      - "3000:3000"     # http://localhost:3000
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  airflow_home:
