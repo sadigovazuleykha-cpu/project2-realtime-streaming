@@ -3,6 +3,7 @@
 Part of the **Matrix Data Mühəndisliyi** final project series. A real-time
 streaming analytics pipeline built on Kafka, Spark Structured Streaming,
 PostgreSQL, Airflow, and Metabase — using live ADS-B air traffic data from
+📊 **[View the live dashboard (PDF snapshot)](docs/dashboard.pdf)**
 the [OpenSky Network](https://opensky-network.org) as the source.
 
 ## Architecture
